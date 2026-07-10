@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jarvis Cloud Desk</title>
+<style>
+  :root{--bg:#12100d;--surface:#1c1915;--border:#38322a;--text:#ede8df;--text2:#a89f90;
+  --muted:#6f675a;--green:#3ecf8e;--red:#e5484d;--amber:#e0a52c;
+  --mono:'SF Mono','JetBrains Mono',Consolas,monospace;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px;line-height:1.5;}
+  .wrap{max-width:960px;margin:0 auto;}
+  h1{font-size:19px;margin:0 0 2px;}
+  .sub{color:var(--text2);font-size:12px;margin:0 0 16px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:10px;margin-bottom:14px;}
+  .metric{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;}
+  .metric .l{font-size:11px;color:var(--text2);margin:0 0 4px;}
+  .metric .v{font-family:var(--mono);font-size:17px;font-weight:600;margin:0;}
+  .up{color:var(--green);}.down{color:var(--red);}
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;}
+  .panel h2{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);margin:0 0 10px;}
+  table{width:100%;border-collapse:collapse;font-size:12px;}
+  th{text-align:left;color:var(--muted);font-weight:500;padding:5px 8px;border-bottom:1px solid var(--border);font-size:10.5px;text-transform:uppercase;}
+  td{padding:6px 8px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11.5px;}
+  .pill{display:inline-block;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:600;}
+  .pill.ce{background:#12291f;color:var(--green);}
+  .pill.pe{background:#2c1416;color:#f28b8e;}
+  .pill.open{background:#2b2210;color:var(--amber);}
+  .note{font-family:var(--mono);font-size:12px;color:var(--amber);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;}
+  .halted{background:#2c1416;border:1px solid var(--red);border-radius:10px;padding:10px 14px;color:#f28b8e;font-weight:600;font-size:13px;margin-bottom:12px;display:none;}
+  .footer{font-size:10.5px;color:var(--muted);margin-top:14px;line-height:1.6;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Jarvis Cloud Desk <span style="font-size:11px;color:var(--amber);">PAPER · AUTONOMOUS · GITHUB ACTIONS</span></h1>
+  <p class="sub" id="lastRun">Loading ledger…</p>
+  <div class="halted" id="halt">⛔ DESK HALTED — 40% drawdown limit hit. Strategy review needed.</div>
+  <div class="grid">
+    <div class="metric"><p class="l">Cash</p><p class="v" id="mCap">—</p></div>
+    <div class="metric"><p class="l">Open P&L</p><p class="v" id="mOpen">—</p></div>
+    <div class="metric"><p class="l">Equity</p><p class="v" id="mEq">—</p></div>
+    <div class="metric"><p class="l">Milestone (₹10L)</p><p class="v" id="mGoal">—</p></div>
+    <div class="metric"><p class="l">Trades</p><p class="v" id="mTr">—</p></div>
+    <div class="metric"><p class="l">Win rate</p><p class="v" id="mWin">—</p></div>
+    <div class="metric"><p class="l">Max DD</p><p class="v" id="mDD">—</p></div>
+  </div>
+  <div class="panel"><h2>Latest engine decision</h2><div class="note" id="note">—</div></div>
+  <div class="panel">
+    <h2>Open positions</h2>
+    <div id="posBox" style="font-size:13px;color:var(--muted);">—</div>
+  </div>
+  <div class="panel">
+    <h2>Trade log</h2>
+    <table><thead><tr><th>Time</th><th>Side</th><th>Strike</th><th>Lots</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Reason</th></tr></thead>
+    <tbody id="logBody"></tbody></table>
+  </div>
+  <p class="footer">Paper trading only — no real orders, ever. Auto-refreshes every 60s. Engine runs every ~20 min during market hours via GitHub Actions; simulated fills ignore slippage and liquidity. Not investment advice.</p>
+</div>
+<script>
+const LOT = 75;
+const inr = x => '₹' + Math.round(x).toLocaleString('en-IN');
+async function refresh() {
+  try {
+    const r = await fetch('ledger.json?t=' + Date.now());
+    const L = await r.json();
+    const openPL = L.open.reduce((a,p)=>a+(p.mark-p.entry)*LOT*p.lots,0);
+    const eq = L.capital + L.open.reduce((a,p)=>a+p.mark*LOT*p.lots,0);
+    const closed = L.trades.filter(t=>!t.open);
+    const wins = closed.filter(t=>t.pnl>0);
+    document.getElementById('lastRun').textContent = 'Last engine run: ' + (L.last_run||'never') + ' · refreshes automatically';
+    document.getElementById('mCap').textContent = inr(L.capital);
+    const o=document.getElementById('mOpen'); o.textContent=inr(openPL); o.className='v '+(openPL>=0?'up':'down');
+    const e=document.getElementById('mEq'); e.textContent=inr(eq); e.className='v '+(eq>=100000?'up':'down');
+    document.getElementById('mGoal').textContent = (eq/1000000*100).toFixed(1)+'%';
+    document.getElementById('mTr').textContent = closed.length;
+    document.getElementById('mWin').textContent = closed.length?Math.round(100*wins.length/closed.length)+'%':'—';
+    document.getElementById('mDD').textContent = (L.maxDD||0).toFixed(1)+'%';
+    document.getElementById('halt').style.display = L.halted?'block':'none';
+    document.getElementById('note').textContent = L.note||'—';
+    const pb = document.getElementById('posBox');
+    pb.innerHTML = L.open.length ? L.open.map(p=>{
+      const pl=(p.mark-p.entry)*LOT*p.lots;
+      return `<div style="font-family:var(--mono);font-size:12.5px;margin-bottom:6px;">
+        <span class="pill ${p.side.toLowerCase()}">${p.side}</span>
+        NIFTY ${p.strike} · ${p.lots} lot(s) · entry ₹${p.entry} · mark ₹${p.mark} ·
+        <span class="${pl>=0?'up':'down'}">${pl>=0?'+':''}${inr(pl)}</span>
+        <span style="color:var(--muted);font-size:10.5px;"> SL ₹${p.sl} · TGT ₹${p.tgt} · exp ${p.expiry}</span></div>`;
+    }).join('') : '<span style="color:var(--muted)">Flat — no open positions</span>';
+    const lb = document.getElementById('logBody');
+    lb.innerHTML = L.trades.length ? L.trades.slice().reverse().map(t=>`<tr>
+      <td>${t.time}</td><td><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td>
+      <td>${t.strike}</td><td>${t.lots}</td><td>₹${t.entry}</td>
+      <td>${t.open?'<span class="pill open">OPEN</span>':'₹'+t.exit}</td>
+      <td class="${t.pnl>0?'up':t.pnl<0?'down':''}">${t.open?'—':(t.pnl>=0?'+':'')+t.pnl.toLocaleString('en-IN')}</td>
+      <td style="font-family:inherit;font-size:10.5px;color:var(--text2);">${t.reason}</td></tr>`).join('')
+      : '<tr><td colspan="8" style="color:var(--muted)">No trades yet</td></tr>';
+  } catch(e) {
+    document.getElementById('lastRun').textContent = 'Could not load ledger.json — check that the Actions workflow has run at least once.';
+  }
+}
+refresh(); setInterval(refresh, 60000);
+</script>
+</body>
+</html>
