@@ -1,47 +1,99 @@
 #!/usr/bin/env python3
 """
-Jarvis Cloud Desk — autonomous NIFTY option-buying paper trader.
-Runs on GitHub Actions every ~20 min during market hours.
-Strategy: OI-wall breakout with trend confirmation. BUY only. Paper only.
-
-Env vars required (GitHub Secrets):
-  DHAN_TOKEN      - Dhan Data API access token
-  DHAN_CLIENT_ID  - Dhan client id
+Jarvis Cloud Desk v2 — TOKEN-FREE autonomous NIFTY option-buying paper trader.
+Data: Yahoo Finance (spot, daily candles, India VIX) + NSE public option chain.
+No credentials, no secrets, no renewals. Paper only — never places real orders.
+Runs on GitHub Actions every ~5 min during market hours.
 """
-import json, os, sys, time
-from datetime import datetime, timedelta
+import json, os, time, urllib.request, urllib.error
+from datetime import datetime
 from zoneinfo import ZoneInfo
-import urllib.request
 
 IST = ZoneInfo("Asia/Kolkata")
-API = "https://api.dhan.co/v2"
-TOKEN = os.environ.get("DHAN_TOKEN", "")
-CLIENT = os.environ.get("DHAN_CLIENT_ID", "")
 LEDGER = "ledger.json"
-LOT = 75  # NIFTY
-NIFTY_ID = 13
+LOT = 75  # NIFTY lot size
 
 # ── Risk framework (hard guardrails) ──
 START_CAP = 100000
-MAX_OUTLAY_PCT = 0.25      # premium per trade
+MAX_OUTLAY_PCT = 0.25
 MAX_POSITIONS = 2
 MAX_TRADES_PER_DAY = 2
-SL_PCT = 0.30              # -30%
-TGT_PCT = 0.60             # +60%
-DERISK_EQ = 80000          # halve size below this
-HALT_EQ = 60000            # stop everything below this
-EXPIRY_SQUAREOFF = (14, 45)  # HH, MM IST on expiry day
+SL_PCT = 0.30
+TGT_PCT = 0.60
+DERISK_EQ = 80000
+HALT_EQ = 60000
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
 
-def api(path, payload):
-    req = urllib.request.Request(
-        API + path,
-        data=json.dumps(payload).encode(),
-        headers={"access-token": TOKEN, "client-id": CLIENT,
-                 "Content-Type": "application/json", "Accept": "application/json"},
-        method="POST")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode())
+def http_get(url, headers=None, timeout=25):
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode(), r.headers
+
+
+def yahoo_chart(symbol, rng="6mo", interval="1d"):
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+           f"?range={rng}&interval={interval}")
+    body, _ = http_get(url)
+    res = json.loads(body)["chart"]["result"][0]
+    closes = [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
+    spot = res["meta"].get("regularMarketPrice") or (closes[-1] if closes else None)
+    return spot, closes
+
+
+def nse_chain():
+    """NSE public option chain with cookie priming. Returns (expiry, {strike:{...}})."""
+    base_headers = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/option-chain",
+    }
+    last_err = None
+    for attempt in range(3):
+        try:
+            # prime session cookies
+            _, h = http_get("https://www.nseindia.com/option-chain", base_headers)
+            cookies = []
+            for k, v in h.items():
+                if k.lower() == "set-cookie":
+                    cookies.append(v.split(";")[0])
+            hdrs = dict(base_headers)
+            if cookies:
+                hdrs["Cookie"] = "; ".join(cookies)
+            body, _ = http_get(
+                "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", hdrs)
+            data = json.loads(body)["records"]
+            expiry = data["expiryDates"][0]
+            chain = {}
+            for row in data["data"]:
+                if row.get("expiryDate") != expiry:
+                    continue
+                s = float(row["strikePrice"])
+                ce, pe = row.get("CE") or {}, row.get("PE") or {}
+                chain[s] = {"ce_oi": ce.get("openInterest", 0),
+                            "ce_ltp": ce.get("lastPrice", 0),
+                            "pe_oi": pe.get("openInterest", 0),
+                            "pe_ltp": pe.get("lastPrice", 0)}
+            if chain:
+                return expiry, chain
+            last_err = "empty chain"
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(4)
+    raise RuntimeError(f"NSE chain unavailable: {last_err}")
+
+
+def ema(vals, n):
+    if len(vals) < n:
+        return None
+    k = 2 / (n + 1)
+    e = sum(vals[:n]) / n
+    for v in vals[n:]:
+        e = v * k + e * (1 - k)
+    return e
 
 
 def now_ist():
@@ -52,7 +104,7 @@ def market_open(t):
     if t.weekday() >= 5:
         return False
     m = t.hour * 60 + t.minute
-    return 555 <= m <= 930  # 09:15–15:30
+    return 555 <= m <= 930
 
 
 def load_ledger():
@@ -78,74 +130,6 @@ def log(L, msg):
     L["note"] = msg
 
 
-def ema(vals, n):
-    if len(vals) < n:
-        return None
-    k = 2 / (n + 1)
-    e = sum(vals[:n]) / n
-    for v in vals[n:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
-def get_spot_vix():
-    d = api("/marketfeed/quote", {"IDX_I": [NIFTY_ID, 21]})
-    data = d.get("data", {}).get("IDX_I", {})
-    spot = data.get(str(NIFTY_ID), {}).get("last_price")
-    vix = data.get("21", {}).get("last_price")
-    return spot, vix
-
-
-def get_chain():
-    exp = api("/optionchain/expirylist", {"UnderlyingScrip": NIFTY_ID, "UnderlyingSeg": "IDX_I"})
-    expiries = exp.get("data", [])
-    if not expiries:
-        raise RuntimeError("no expiries returned")
-    expiry = expiries[0]
-    time.sleep(3)  # option chain rate limit: 1 per 3s
-    ch = api("/optionchain", {"UnderlyingScrip": NIFTY_ID, "UnderlyingSeg": "IDX_I", "Expiry": expiry})
-    oc = ch.get("data", {}).get("oc", {})
-    chain = {}
-    for k, v in oc.items():
-        strike = float(k)
-        ce, pe = v.get("ce", {}), v.get("pe", {})
-        chain[strike] = {
-            "ce_oi": ce.get("oi", 0), "ce_ltp": ce.get("last_price", 0),
-            "pe_oi": pe.get("oi", 0), "pe_ltp": pe.get("last_price", 0)}
-    return expiry, chain
-
-
-def get_ema21():
-    to = now_ist().date() + timedelta(days=1)
-    frm = to - timedelta(days=130)
-    d = api("/charts/historical", {"securityId": str(NIFTY_ID), "exchangeSegment": "IDX_I",
-                                   "instrument": "INDEX", "expiryCode": 0,
-                                   "fromDate": str(frm), "toDate": str(to)})
-    closes = d.get("close") or d.get("data", {}).get("close") or []
-    return ema(closes[-80:], 21) if len(closes) >= 25 else None
-
-
-def walls(chain, spot):
-    ce_band = {s: v["ce_oi"] for s, v in chain.items() if spot <= s <= spot + 600 and v["ce_oi"] > 0}
-    pe_band = {s: v["pe_oi"] for s, v in chain.items() if spot - 600 <= s <= spot and v["pe_oi"] > 0}
-    ce_wall = max(ce_band, key=ce_band.get) if ce_band else None
-    pe_wall = max(pe_band, key=pe_band.get) if pe_band else None
-    return ce_wall, pe_wall
-
-
-def atm_strike(chain, spot):
-    return min(chain, key=lambda s: abs(s - spot))
-
-
-def mark_positions(L, chain):
-    for p in L["open"]:
-        row = chain.get(float(p["strike"]))
-        if row:
-            m = row["ce_ltp"] if p["side"] == "CE" else row["pe_ltp"]
-            if m and m > 0:
-                p["mark"] = m
-
-
 def close_position(L, p, price, why):
     proceeds = price * LOT * p["lots"]
     L["capital"] += proceeds
@@ -164,7 +148,7 @@ def open_position(L, side, strike, prem, why, expiry):
     cap_pct = MAX_OUTLAY_PCT / 2 if eq < DERISK_EQ else MAX_OUTLAY_PCT
     lots = int((eq * cap_pct) // (prem * LOT))
     if lots < 1:
-        log(L, f"skip entry {side} {strike}: premium {prem} too large for sizing")
+        log(L, f"skip {side} {strike}: premium {prem} too large for sizing")
         return
     cost = prem * LOT * lots
     if cost > L["capital"]:
@@ -190,35 +174,52 @@ def main():
     L = load_ledger()
     t = now_ist()
 
-    if not TOKEN or not CLIENT:
-        log(L, "ERROR: DHAN_TOKEN / DHAN_CLIENT_ID secrets not set")
-        save_ledger(L); return
     if L["halted"]:
         log(L, "desk halted (drawdown) — no action"); save_ledger(L); return
     if not market_open(t):
         log(L, "market closed — no action"); save_ledger(L); return
 
+    # ── data: spot + trend (Yahoo, very reliable) ──
     try:
-        spot, vix = get_spot_vix()
-        expiry, chain = get_chain()
-        if not spot or not chain:
-            raise RuntimeError("empty spot/chain")
+        spot, closes = yahoo_chart("%5ENSEI")
+        e21 = ema(closes[-80:], 21)
+        e50 = ema(closes[-120:], 50)
+        try:
+            vix, _ = yahoo_chart("%5EINDIAVIX", rng="5d")
+        except Exception:
+            vix = None
+        if not spot:
+            raise RuntimeError("no spot")
     except Exception as e:
-        log(L, f"data fetch failed: {e} — holding safely")
+        log(L, f"price data unavailable ({e}) — holding safely")
         save_ledger(L); return
 
-    mark_positions(L, chain)
+    # ── data: option chain (NSE public; can be flaky from cloud IPs) ──
+    chain, expiry, chain_ok = {}, None, True
+    try:
+        expiry, chain = nse_chain()
+        # normalize NSE expiry ('10-Jul-2026') to date for squareoff check
+        exp_date = datetime.strptime(expiry, "%d-%b-%Y").date()
+    except Exception as e:
+        chain_ok = False
+        log(L, f"chain unavailable ({e}) — managing with price data only")
 
-    # ── manage exits ──
-    is_expiry_day = str(t.date()) == expiry
-    squareoff = is_expiry_day and (t.hour, t.minute) >= EXPIRY_SQUAREOFF
-    for p in list(L["open"]):
-        if p["mark"] <= p["sl"]:
-            close_position(L, p, p["mark"], "SL hit")
-        elif p["mark"] >= p["tgt"]:
-            close_position(L, p, p["mark"], "target hit")
-        elif squareoff:
-            close_position(L, p, p["mark"], "expiry squareoff")
+    # ── mark & manage open positions ──
+    if chain_ok:
+        for p in L["open"]:
+            row = chain.get(float(p["strike"]))
+            if row:
+                m = row["ce_ltp"] if p["side"] == "CE" else row["pe_ltp"]
+                if m and m > 0:
+                    p["mark"] = m
+        squareoff = (str(t.date()) == str(exp_date)) and (t.hour, t.minute) >= (14, 45)
+        for p in list(L["open"]):
+            if p["mark"] <= p["sl"]:
+                close_position(L, p, p["mark"], "SL hit")
+            elif p["mark"] >= p["tgt"]:
+                close_position(L, p, p["mark"], "target hit")
+            elif squareoff:
+                close_position(L, p, p["mark"], "expiry squareoff")
 
     # ── drawdown accounting ──
     eq = equity(L)
@@ -229,34 +230,37 @@ def main():
         log(L, f"DESK HALTED at equity {round(eq)}")
         save_ledger(L); return
 
-    # ── entries ──
-    if len(L["open"]) < MAX_POSITIONS and trades_today(L) < MAX_TRADES_PER_DAY \
-       and not (is_expiry_day and t.hour >= 13):  # no fresh theta bombs on expiry afternoon
-        try:
-            e21 = get_ema21()
-        except Exception:
-            e21 = None
-        ce_wall, pe_wall = walls(chain, spot)
-        atm = atm_strike(chain, spot)
-        entered = False
+    # ── entries (need the chain; skip cleanly if unavailable) ──
+    if chain_ok and len(L["open"]) < MAX_POSITIONS and trades_today(L) < MAX_TRADES_PER_DAY:
+        is_expiry_day = str(t.date()) == str(exp_date)
+        if not (is_expiry_day and t.hour >= 13):
+            ce_band = {s: v["ce_oi"] for s, v in chain.items()
+                       if spot <= s <= spot + 600 and v["ce_oi"] > 0}
+            pe_band = {s: v["pe_oi"] for s, v in chain.items()
+                       if spot - 600 <= s <= spot and v["pe_oi"] > 0}
+            ce_wall = max(ce_band, key=ce_band.get) if ce_band else None
+            pe_wall = max(pe_band, key=pe_band.get) if pe_band else None
+            atm = min(chain, key=lambda s: abs(s - spot))
+            entered = False
 
-        if ce_wall and spot > ce_wall - 50 and (e21 is None or spot > e21):
-            prem = chain[atm]["ce_ltp"]
-            if prem > 0:
-                open_position(L, "CE", atm, prem,
-                              f"spot {spot} pressing CE wall {ce_wall}, trend ok (EMA21 {round(e21,1) if e21 else 'n/a'})",
-                              expiry)
-                entered = True
-        elif pe_wall and spot < pe_wall - 20 and (e21 is None or spot < e21):
-            prem = chain[atm]["pe_ltp"]
-            if prem > 0:
-                open_position(L, "PE", atm, prem,
-                              f"spot {spot} broke PE wall {pe_wall}, trend down (EMA21 {round(e21,1) if e21 else 'n/a'})",
-                              expiry)
-                entered = True
+            if ce_wall and spot > ce_wall - 50 and (e21 is None or spot > e21):
+                prem = chain[atm]["ce_ltp"]
+                if prem > 0:
+                    open_position(L, "CE", atm, prem,
+                                  f"spot {round(spot,1)} pressing CE wall {ce_wall}, "
+                                  f"trend up (EMA21 {round(e21,1) if e21 else 'n/a'})", expiry)
+                    entered = True
+            elif pe_wall and spot < pe_wall - 20 and (e21 is None or spot < e21):
+                prem = chain[atm]["pe_ltp"]
+                if prem > 0:
+                    open_position(L, "PE", atm, prem,
+                                  f"spot {round(spot,1)} broke PE wall {pe_wall}, "
+                                  f"trend down (EMA21 {round(e21,1) if e21 else 'n/a'})", expiry)
+                    entered = True
 
-        if not entered and not L["open"]:
-            log(L, f"HOLD — spot {spot} inside walls (PE {pe_wall} / CE {ce_wall}), VIX {vix}")
+            if not entered and not L["open"]:
+                log(L, f"HOLD — spot {round(spot,1)} inside walls (PE {pe_wall} / CE {ce_wall}), "
+                       f"EMA21 {round(e21,1) if e21 else 'n/a'}, VIX {round(vix,1) if vix else 'n/a'}")
 
     save_ledger(L)
 
