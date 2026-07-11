@@ -86,6 +86,62 @@ def nse_chain():
     raise RuntimeError(f"NSE chain unavailable: {last_err}")
 
 
+
+
+# ── Telegram notifications ──
+def tg_api(method, payload):
+    token = os.environ.get("TG_TOKEN", "")
+    if not token:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/{method}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        print("telegram error:", e)
+        return None
+
+
+def tg_chat_id(L):
+    if L.get("tg_chat"):
+        return L["tg_chat"]
+    r = tg_api("getUpdates", {})
+    if r and r.get("result"):
+        for u in reversed(r["result"]):
+            msg = u.get("message") or u.get("my_chat_member") or {}
+            chat = msg.get("chat", {})
+            if chat.get("id"):
+                L["tg_chat"] = chat["id"]
+                return L["tg_chat"]
+    return None
+
+
+def tg_send(L, text):
+    chat = tg_chat_id(L)
+    if chat:
+        tg_api("sendMessage", {"chat_id": chat, "text": text})
+
+
+def tg_daily_summary(L):
+    eq = equity(L)
+    today = now_ist().strftime("%d-%b")
+    todays = [t for t in L["trades"] if t["time"].startswith(today)]
+    closed_today = [t for t in todays if not t.get("open")]
+    pnl_today = sum(t["pnl"] for t in closed_today)
+    e = "🟢" if pnl_today >= 0 else "🔴"
+    msg = (f"📊 Market closed — today's report\n"
+           f"Money now: ₹{round(eq):,}\n"
+           f"Today: {e} ₹{round(pnl_today):,} ({len(todays)} trade(s))\n"
+           f"Goal progress: {eq/1000000*100:.1f}% of ₹10L")
+    if L["open"]:
+        msg += "\nHolding overnight: " + ", ".join(
+            f"NIFTY {p['strike']} {p['side']}" for p in L["open"])
+    tg_send(L, msg)
+
+
 def ema(vals, n):
     if len(vals) < n:
         return None
@@ -190,6 +246,9 @@ def close_position(L, p, price, why):
             break
     L["open"].remove(p)
     log(L, f"EXIT {p['side']} {p['strike']} @ {price} ({why}) pnl {round(pnl)}")
+    e = "🟢" if pnl >= 0 else "🔴"
+    tg_send(L, f"{e} SOLD: NIFTY {p['strike']} {p['side']} at ₹{price}\n"
+               f"Result: ₹{round(pnl):,} ({why})\nMoney now: ₹{round(equity(L)):,}")
 
 
 def open_position(L, side, strike, prem, why, expiry):
@@ -212,6 +271,8 @@ def open_position(L, side, strike, prem, why, expiry):
                         "lots": lots, "entry": prem, "exit": None, "pnl": 0,
                         "open": True, "strategy": "OI-breakout", "reason": why})
     log(L, f"ENTER {side} {strike} x{lots} @ {prem} — {why}")
+    tg_send(L, f"🛒 BOUGHT: NIFTY {strike} {side} ×{lots} lot(s) at ₹{prem}\n"
+               f"Why: {why}\nSafety stop: ₹{round(prem*(1-SL_PCT),1)} | Target: ₹{round(prem*(1+TGT_PCT),1)}")
 
 
 def trades_today(L):
@@ -225,7 +286,17 @@ def main():
 
     if L["halted"]:
         log(L, "desk halted (drawdown) — no action"); save_ledger(L); return
+    if not L.get("tg_hello") and os.environ.get("TG_TOKEN"):
+        if tg_chat_id(L):
+            tg_send(L, "🤖 Jarvis connected! I will message you here for every trade "
+                       "and a daily report at market close. Paper trading only — practice money.")
+            L["tg_hello"] = True
     if not market_open(t):
+        m = t.hour * 60 + t.minute
+        today_s = str(t.date())
+        if 930 < m <= 1020 and t.weekday() < 5 and L.get("summary_date") != today_s:
+            tg_daily_summary(L)
+            L["summary_date"] = today_s
         log(L, "market closed — no action"); save_ledger(L); return
 
     # ── data: spot + trend (Yahoo, very reliable) ──
