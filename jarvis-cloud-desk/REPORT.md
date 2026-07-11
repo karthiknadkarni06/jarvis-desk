@@ -1,6 +1,6 @@
 # 🤖 Jarvis Paper Trading — Live Dashboard
 
-**Updated:** 11-Jul-2026 19:23 IST
+**Updated:** 11-Jul-2026 20:03 IST
 
 | Money now | Profit/Loss | Goal (₹10 Lakh) | Trades | Win rate | Worst dip |
 |---|---|---|---|---|---|
@@ -14,5 +14,11 @@ _None right now — waiting for a good opportunity (this is normal and safe)._
 ## Trade history (latest first)
 _No trades yet. Trading starts automatically when markets open (Mon–Fri, 9:15 AM)._
 
+## How Jarvis decides (plain words)
+- **wall-break** strategy: big players park huge option bets at certain levels — these act as floor and ceiling. When price smashes through one AND the trend agrees, Jarvis buys that direction. Stop-loss −30%, target +60%.
+- **scalp** experiment: when price makes a sharp fast move within the day, Jarvis rides it briefly. Smaller size (15%), tight stop −20%, quick target +30%, auto-exit within 60 minutes.
+- Most of the time: **no trade**. Sitting out when there's no edge is the strategy working, not failing.
+- Hard safety rules: max 2 positions, max 3 trades/day, sizes halve below ₹80k, everything halts below ₹60k.
+
 ---
-_Paper trading only — practice money, no real orders ever. Refresh this page anytime to see the latest._
+_Paper trading only — practice money, no real orders ever. Refresh anytime for the latest._
