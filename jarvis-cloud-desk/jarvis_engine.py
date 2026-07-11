@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Jarvis Cloud Desk v2 — TOKEN-FREE autonomous NIFTY option-buying paper trader.
-Data: Yahoo Finance (spot, daily candles, India VIX) + NSE public option chain.
-No credentials, no secrets, no renewals. Paper only — never places real orders.
-Runs on GitHub Actions every ~5 min during market hours.
+Jarvis Cloud Desk v3 — token-free autonomous option-buying paper trader.
+Underlyings: NIFTY + BANKNIFTY. Strategies: OI-wall breakout + momentum scalp (experiment).
+Data: Yahoo Finance + NSE public chain. Telegram alerts. Paper only, never real orders.
 """
 import json, os, time, urllib.request, urllib.error
 from datetime import datetime
@@ -11,17 +10,21 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 LEDGER = "ledger.json"
-LOT = 75  # NIFTY lot size
 
-# ── Risk framework (hard guardrails) ──
+UNDS = {
+    "NIFTY":     {"lot": 75, "yahoo": "%5ENSEI",    "nse": "NIFTY"},
+    "BANKNIFTY": {"lot": 35, "yahoo": "%5ENSEBANK", "nse": "BANKNIFTY"},
+}
+
 START_CAP = 100000
-MAX_OUTLAY_PCT = 0.25
 MAX_POSITIONS = 2
-MAX_TRADES_PER_DAY = 2
-SL_PCT = 0.30
-TGT_PCT = 0.60
-DERISK_EQ = 80000
-HALT_EQ = 60000
+MAX_TRADES_PER_DAY = 3
+WALL_OUTLAY = 0.25      # wall-break trades: up to 25% of equity
+SCALP_OUTLAY = 0.15     # scalp experiment: up to 15%
+WALL_SL, WALL_TGT = 0.30, 0.60
+SCALP_SL, SCALP_TGT = 0.20, 0.30
+SCALP_MAX_MIN = 60
+DERISK_EQ, HALT_EQ = 80000, 60000
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -34,37 +37,28 @@ def http_get(url, headers=None, timeout=25):
 
 
 def yahoo_chart(symbol, rng="6mo", interval="1d"):
-    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-           f"?range={rng}&interval={interval}")
-    body, _ = http_get(url)
+    body, _ = http_get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+                       f"?range={rng}&interval={interval}")
     res = json.loads(body)["chart"]["result"][0]
     closes = [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
     spot = res["meta"].get("regularMarketPrice") or (closes[-1] if closes else None)
     return spot, closes
 
 
-def nse_chain():
-    """NSE public option chain with cookie priming. Returns (expiry, {strike:{...}})."""
-    base_headers = {
-        "User-Agent": UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com/option-chain",
-    }
+def nse_chain(nse_symbol):
+    base = {"User-Agent": UA, "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/option-chain"}
     last_err = None
-    for attempt in range(3):
+    for _ in range(3):
         try:
-            # prime session cookies
-            _, h = http_get("https://www.nseindia.com/option-chain", base_headers)
-            cookies = []
-            for k, v in h.items():
-                if k.lower() == "set-cookie":
-                    cookies.append(v.split(";")[0])
-            hdrs = dict(base_headers)
+            _, h = http_get("https://www.nseindia.com/option-chain", base)
+            cookies = [v.split(";")[0] for k, v in h.items() if k.lower() == "set-cookie"]
+            hdrs = dict(base)
             if cookies:
                 hdrs["Cookie"] = "; ".join(cookies)
-            body, _ = http_get(
-                "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY", hdrs)
+            body, _ = http_get("https://www.nseindia.com/api/option-chain-indices"
+                               f"?symbol={nse_symbol}", hdrs)
             data = json.loads(body)["records"]
             expiry = data["expiryDates"][0]
             chain = {}
@@ -73,36 +67,66 @@ def nse_chain():
                     continue
                 s = float(row["strikePrice"])
                 ce, pe = row.get("CE") or {}, row.get("PE") or {}
-                chain[s] = {"ce_oi": ce.get("openInterest", 0),
-                            "ce_ltp": ce.get("lastPrice", 0),
-                            "pe_oi": pe.get("openInterest", 0),
-                            "pe_ltp": pe.get("lastPrice", 0)}
+                chain[s] = {"ce_oi": ce.get("openInterest", 0), "ce_ltp": ce.get("lastPrice", 0),
+                            "pe_oi": pe.get("openInterest", 0), "pe_ltp": pe.get("lastPrice", 0)}
             if chain:
                 return expiry, chain
-            last_err = "empty chain"
+            last_err = "empty"
         except Exception as e:
             last_err = str(e)
         time.sleep(4)
-    raise RuntimeError(f"NSE chain unavailable: {last_err}")
+    raise RuntimeError(f"chain unavailable: {last_err}")
 
 
+def ema(vals, n):
+    if len(vals) < n:
+        return None
+    k = 2 / (n + 1)
+    e = sum(vals[:n]) / n
+    for v in vals[n:]:
+        e = v * k + e * (1 - k)
+    return e
 
 
-# ── Telegram notifications ──
+def now_ist():
+    return datetime.now(IST)
+
+
+def market_open(t):
+    return t.weekday() < 5 and 555 <= t.hour * 60 + t.minute <= 930
+
+
+def load_ledger():
+    if os.path.exists(LEDGER):
+        with open(LEDGER) as f:
+            return json.load(f)
+    return {"capital": START_CAP, "open": [], "trades": [], "peak": START_CAP,
+            "maxDD": 0.0, "halted": False, "last_run": None, "note": "initialized",
+            "eq_hist": []}
+
+
+def equity(L):
+    return L["capital"] + sum(p["mark"] * UNDS[p["und"]]["lot"] * p["lots"] for p in L["open"])
+
+
+def log(L, msg):
+    print(msg)
+    L["note"] = msg
+
+
+# ── Telegram ──
 def tg_api(method, payload):
     token = os.environ.get("TG_TOKEN", "")
     if not token:
         return None
     try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/{method}",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/{method}",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=15) as r:
             return json.loads(r.read().decode())
     except Exception as e:
         print("telegram error:", e)
-        return None
 
 
 def tg_chat_id(L):
@@ -111,12 +135,10 @@ def tg_chat_id(L):
     r = tg_api("getUpdates", {})
     if r and r.get("result"):
         for u in reversed(r["result"]):
-            msg = u.get("message") or u.get("my_chat_member") or {}
-            chat = msg.get("chat", {})
+            chat = (u.get("message") or {}).get("chat", {})
             if chat.get("id"):
                 L["tg_chat"] = chat["id"]
                 return L["tg_chat"]
-    return None
 
 
 def tg_send(L, text):
@@ -138,141 +160,121 @@ def tg_daily_summary(L):
            f"Goal progress: {eq/1000000*100:.1f}% of ₹10L")
     if L["open"]:
         msg += "\nHolding overnight: " + ", ".join(
-            f"NIFTY {p['strike']} {p['side']}" for p in L["open"])
+            f"{p['und']} {p['strike']} {p['side']}" for p in L["open"])
     tg_send(L, msg)
 
 
-def ema(vals, n):
-    if len(vals) < n:
-        return None
-    k = 2 / (n + 1)
-    e = sum(vals[:n]) / n
-    for v in vals[n:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
-def now_ist():
-    return datetime.now(IST)
-
-
-def market_open(t):
-    if t.weekday() >= 5:
-        return False
-    m = t.hour * 60 + t.minute
-    return 555 <= m <= 930
-
-
-def load_ledger():
-    if os.path.exists(LEDGER):
-        with open(LEDGER) as f:
-            return json.load(f)
-    return {"capital": START_CAP, "open": [], "trades": [], "peak": START_CAP,
-            "maxDD": 0.0, "halted": False, "last_run": None, "note": "initialized"}
-
-
-
-
+# ── Report ──
 def write_report(L):
-    """Human-readable dashboard as REPORT.md — the page Karthik bookmarks."""
     eq = equity(L)
-    open_pl = sum((p["mark"] - p["entry"]) * LOT * p["lots"] for p in L["open"])
     closed = [t for t in L["trades"] if not t.get("open")]
     wins = [t for t in closed if t["pnl"] > 0]
     wr = f"{round(100*len(wins)/len(closed))}%" if closed else "—"
     pnl = eq - START_CAP
     arrow = "🟢" if pnl >= 0 else "🔴"
     lines = [
-        "# 🤖 Jarvis Paper Trading — Live Dashboard",
-        "",
-        f"**Updated:** {L['last_run'] or now_ist().strftime('%d-%b-%Y %H:%M IST')}",
-        "",
-        f"| Money now | Profit/Loss | Goal (₹10 Lakh) | Trades | Win rate | Worst dip |",
-        f"|---|---|---|---|---|---|",
+        "# 🤖 Jarvis Paper Trading — Live Dashboard", "",
+        f"**Updated:** {L['last_run'] or ''}", "",
+        "| Money now | Profit/Loss | Goal (₹10 Lakh) | Trades | Win rate | Worst dip |",
+        "|---|---|---|---|---|---|",
         f"| **₹{round(eq):,}** | {arrow} ₹{round(pnl):,} | {eq/1000000*100:.1f}% | {len(closed)} | {wr} | {L['maxDD']:.1f}% |",
         "",
-        f"**What Jarvis is thinking right now:** {L['note']}",
-        "",
-        "## Open trades",
+        f"**What Jarvis is thinking right now:** {L['note']}", "",
     ]
+    hist = L.get("eq_hist", [])
+    if len(hist) >= 2:
+        pts = hist[-60:]
+        lines += ["## Money over time (equity curve)", "", "```mermaid",
+                  "xychart-beta",
+                  '  title "Account value ₹"',
+                  "  x-axis [" + ", ".join(f'"{p[0]}"' for p in pts) + "]",
+                  f"  y-axis \"₹\" {min(v for _, v in pts)*0.99:.0f} --> {max(v for _, v in pts)*1.01:.0f}",
+                  "  line [" + ", ".join(str(round(v)) for _, v in pts) + "]",
+                  "```", ""]
+    by_strat = {}
+    for t in closed:
+        s = t.get("strategy", "other")
+        by_strat.setdefault(s, []).append(t)
+    if by_strat:
+        lines += ["## Which strategy is earning?", "",
+                  "| Strategy | Trades | Wins | Total P&L |", "|---|---|---|---|"]
+        for s, ts in by_strat.items():
+            w = sum(1 for t in ts if t["pnl"] > 0)
+            lines.append(f"| {s} | {len(ts)} | {w} | ₹{sum(t['pnl'] for t in ts):,} |")
+        lines.append("")
+    lines += ["## Open trades"]
     if L["open"]:
-        lines += ["| Trade | Lots | Bought at | Now at | Profit/Loss |", "|---|---|---|---|---|"]
+        lines += ["| Trade | Lots | Bought at | Now at | Profit/Loss | Strategy |", "|---|---|---|---|---|---|"]
         for p in L["open"]:
-            pl = (p["mark"] - p["entry"]) * LOT * p["lots"]
+            pl = (p["mark"] - p["entry"]) * UNDS[p["und"]]["lot"] * p["lots"]
             e = "🟢" if pl >= 0 else "🔴"
-            lines.append(f"| NIFTY {p['strike']} {p['side']} | {p['lots']} | ₹{p['entry']} | ₹{p['mark']} | {e} ₹{round(pl):,} |")
+            lines.append(f"| {p['und']} {p['strike']} {p['side']} | {p['lots']} | ₹{p['entry']} | ₹{p['mark']} | {e} ₹{round(pl):,} | {p.get('strategy','')} |")
     else:
         lines.append("_None right now — waiting for a good opportunity (this is normal and safe)._")
     lines += ["", "## Trade history (latest first)"]
     if L["trades"]:
         lines += ["| When | Trade | Bought | Sold | Profit/Loss | Why |", "|---|---|---|---|---|---|"]
-        for t in reversed(L["trades"][-20:]):
+        for t in reversed(L["trades"][-25:]):
             ex = f"₹{t['exit']}" if not t.get("open") else "OPEN"
             pl = f"₹{t['pnl']:,}" if not t.get("open") else "—"
-            lines.append(f"| {t['time']} | {t['und']} {t['strike']} {t['side']} ×{t['lots']} | ₹{t['entry']} | {ex} | {pl} | {t['reason'][:80]} |")
+            lines.append(f"| {t['time']} | {t['und']} {t['strike']} {t['side']} ×{t['lots']} | ₹{t['entry']} | {ex} | {pl} | {t['reason'][:90]} |")
     else:
         lines.append("_No trades yet. Trading starts automatically when markets open (Mon–Fri, 9:15 AM)._")
-    lines += ["", "---", "_Paper trading only — practice money, no real orders ever. Refresh this page anytime to see the latest._"]
+    lines += ["", "## How Jarvis decides (plain words)",
+              "- **wall-break** strategy: big players park huge option bets at certain levels — these act as floor and ceiling. When price smashes through one AND the trend agrees, Jarvis buys that direction. Stop-loss −30%, target +60%.",
+              "- **scalp** experiment: when price makes a sharp fast move within the day, Jarvis rides it briefly. Smaller size (15%), tight stop −20%, quick target +30%, auto-exit within 60 minutes.",
+              "- Most of the time: **no trade**. Sitting out when there's no edge is the strategy working, not failing.",
+              "- Hard safety rules: max 2 positions, max 3 trades/day, sizes halve below ₹80k, everything halts below ₹60k.",
+              "", "---",
+              "_Paper trading only — practice money, no real orders ever. Refresh anytime for the latest._"]
     with open("REPORT.md", "w") as f:
         f.write("\n".join(lines))
 
-def save_ledger(L):
-    L["last_run"] = now_ist().strftime("%d-%b-%Y %H:%M IST")
-    with open(LEDGER, "w") as f:
-        json.dump(L, f, indent=1)
-    try:
-        write_report(L)
-    except Exception as e:
-        print("report write failed:", e)
-
-
-def equity(L):
-    return L["capital"] + sum(p["mark"] * LOT * p["lots"] for p in L["open"])
-
-
-def log(L, msg):
-    print(msg)
-    L["note"] = msg
-
 
 def close_position(L, p, price, why):
-    proceeds = price * LOT * p["lots"]
+    lot = UNDS[p["und"]]["lot"]
+    proceeds = price * lot * p["lots"]
     L["capital"] += proceeds
-    pnl = proceeds - p["entry"] * LOT * p["lots"]
+    pnl = proceeds - p["entry"] * lot * p["lots"]
     for t in L["trades"]:
-        if t.get("open") and t["strike"] == p["strike"] and t["side"] == p["side"]:
+        if t.get("open") and t["strike"] == p["strike"] and t["side"] == p["side"] and t["und"] == p["und"]:
             t.update({"exit": price, "pnl": round(pnl), "open": False,
                       "reason": t["reason"] + " → " + why})
             break
     L["open"].remove(p)
-    log(L, f"EXIT {p['side']} {p['strike']} @ {price} ({why}) pnl {round(pnl)}")
+    log(L, f"EXIT {p['und']} {p['side']} {p['strike']} @ {price} ({why}) pnl {round(pnl)}")
     e = "🟢" if pnl >= 0 else "🔴"
-    tg_send(L, f"{e} SOLD: NIFTY {p['strike']} {p['side']} at ₹{price}\n"
+    tg_send(L, f"{e} SOLD: {p['und']} {p['strike']} {p['side']} at ₹{price}\n"
                f"Result: ₹{round(pnl):,} ({why})\nMoney now: ₹{round(equity(L)):,}")
 
 
-def open_position(L, side, strike, prem, why, expiry):
+def open_position(L, und, side, strike, prem, why, expiry, strategy):
     eq = equity(L)
-    cap_pct = MAX_OUTLAY_PCT / 2 if eq < DERISK_EQ else MAX_OUTLAY_PCT
-    lots = int((eq * cap_pct) // (prem * LOT))
+    lot = UNDS[und]["lot"]
+    cap = SCALP_OUTLAY if strategy == "scalp" else WALL_OUTLAY
+    if eq < DERISK_EQ:
+        cap /= 2
+    lots = int((eq * cap) // (prem * lot))
     if lots < 1:
-        log(L, f"skip {side} {strike}: premium {prem} too large for sizing")
+        log(L, f"skip {und} {side} {strike}: premium {prem} too big for sizing")
         return
-    cost = prem * LOT * lots
+    cost = prem * lot * lots
     if cost > L["capital"]:
-        log(L, "skip entry: insufficient cash")
         return
     L["capital"] -= cost
+    sl_pct, tgt_pct = (SCALP_SL, SCALP_TGT) if strategy == "scalp" else (WALL_SL, WALL_TGT)
     t = now_ist().strftime("%d-%b %H:%M")
-    L["open"].append({"side": side, "strike": strike, "entry": prem, "mark": prem,
-                      "lots": lots, "sl": round(prem * (1 - SL_PCT), 1),
-                      "tgt": round(prem * (1 + TGT_PCT), 1), "time": t, "expiry": expiry})
-    L["trades"].append({"time": t, "und": "NIFTY", "side": side, "strike": strike,
-                        "lots": lots, "entry": prem, "exit": None, "pnl": 0,
-                        "open": True, "strategy": "OI-breakout", "reason": why})
-    log(L, f"ENTER {side} {strike} x{lots} @ {prem} — {why}")
-    tg_send(L, f"🛒 BOUGHT: NIFTY {strike} {side} ×{lots} lot(s) at ₹{prem}\n"
-               f"Why: {why}\nSafety stop: ₹{round(prem*(1-SL_PCT),1)} | Target: ₹{round(prem*(1+TGT_PCT),1)}")
+    L["open"].append({"und": und, "side": side, "strike": strike, "entry": prem, "mark": prem,
+                      "lots": lots, "sl": round(prem*(1-sl_pct), 1), "tgt": round(prem*(1+tgt_pct), 1),
+                      "time": t, "expiry": expiry, "strategy": strategy,
+                      "ts": int(time.time())})
+    L["trades"].append({"time": t, "und": und, "side": side, "strike": strike, "lots": lots,
+                        "entry": prem, "exit": None, "pnl": 0, "open": True,
+                        "strategy": strategy, "reason": why})
+    log(L, f"ENTER {und} {side} {strike} x{lots} @ {prem} [{strategy}] — {why}")
+    tg_send(L, f"🛒 BOUGHT: {und} {strike} {side} ×{lots} lot(s) at ₹{prem}\n"
+               f"Strategy: {strategy}\nWhy: {why}\n"
+               f"Safety stop: ₹{round(prem*(1-sl_pct),1)} | Target: ₹{round(prem*(1+tgt_pct),1)}")
 
 
 def trades_today(L):
@@ -280,108 +282,153 @@ def trades_today(L):
     return sum(1 for t in L["trades"] if t["time"].startswith(today))
 
 
+def save_ledger(L):
+    L["last_run"] = now_ist().strftime("%d-%b-%Y %H:%M IST")
+    eq = round(equity(L))
+    hist = L.setdefault("eq_hist", [])
+    stamp = now_ist().strftime("%d %H:%M")
+    if not hist or hist[-1][1] != eq:
+        hist.append([stamp, eq])
+        del hist[:-300]
+    with open(LEDGER, "w") as f:
+        json.dump(L, f, indent=1)
+    try:
+        write_report(L)
+    except Exception as e:
+        print("report failed:", e)
+
+
 def main():
     L = load_ledger()
     t = now_ist()
 
+    if not L.get("tg_hello") and os.environ.get("TG_TOKEN") and tg_chat_id(L):
+        tg_send(L, "🤖 Jarvis connected! I will message you here for every trade "
+                   "and a daily report at market close. Paper trading only — practice money.")
+        L["tg_hello"] = True
+
     if L["halted"]:
         log(L, "desk halted (drawdown) — no action"); save_ledger(L); return
-    if not L.get("tg_hello") and os.environ.get("TG_TOKEN"):
-        if tg_chat_id(L):
-            tg_send(L, "🤖 Jarvis connected! I will message you here for every trade "
-                       "and a daily report at market close. Paper trading only — practice money.")
-            L["tg_hello"] = True
     if not market_open(t):
         m = t.hour * 60 + t.minute
         today_s = str(t.date())
-        if 930 < m <= 1020 and t.weekday() < 5 and L.get("summary_date") != today_s:
+        if 930 < m <= 1025 and t.weekday() < 5 and L.get("summary_date") != today_s:
             tg_daily_summary(L)
             L["summary_date"] = today_s
         log(L, "market closed — no action"); save_ledger(L); return
 
-    # ── data: spot + trend (Yahoo, very reliable) ──
-    try:
-        spot, closes = yahoo_chart("%5ENSEI")
-        e21 = ema(closes[-80:], 21)
-        e50 = ema(closes[-120:], 50)
+    # ── data per underlying ──
+    data = {}
+    for und, cfg in UNDS.items():
         try:
-            vix, _ = yahoo_chart("%5EINDIAVIX", rng="5d")
-        except Exception:
-            vix = None
-        if not spot:
-            raise RuntimeError("no spot")
-    except Exception as e:
-        log(L, f"price data unavailable ({e}) — holding safely")
-        save_ledger(L); return
+            spot, closes = yahoo_chart(cfg["yahoo"])
+            e21 = ema(closes[-80:], 21)
+            data[und] = {"spot": spot, "e21": e21}
+        except Exception as e:
+            print(f"{und} price data failed: {e}")
+    if not data:
+        log(L, "all price data unavailable — holding safely"); save_ledger(L); return
 
-    # ── data: option chain (NSE public; can be flaky from cloud IPs) ──
-    chain, expiry, chain_ok = {}, None, True
-    try:
-        expiry, chain = nse_chain()
-        # normalize NSE expiry ('10-Jul-2026') to date for squareoff check
-        exp_date = datetime.strptime(expiry, "%d-%b-%Y").date()
-    except Exception as e:
-        chain_ok = False
-        log(L, f"chain unavailable ({e}) — managing with price data only")
+    chains = {}
+    for und in list(data.keys()):
+        try:
+            expiry, chain = nse_chain(UNDS[und]["nse"])
+            chains[und] = {"expiry": expiry, "chain": chain,
+                           "exp_date": datetime.strptime(expiry, "%d-%b-%Y").date()}
+            time.sleep(3)
+        except Exception as e:
+            print(f"{und} chain failed: {e}")
 
-    # ── mark & manage open positions ──
-    if chain_ok:
-        for p in L["open"]:
-            row = chain.get(float(p["strike"]))
+    # ── manage open positions ──
+    for p in list(L["open"]):
+        c = chains.get(p["und"])
+        if c:
+            row = c["chain"].get(float(p["strike"]))
             if row:
                 m = row["ce_ltp"] if p["side"] == "CE" else row["pe_ltp"]
                 if m and m > 0:
                     p["mark"] = m
-        squareoff = (str(t.date()) == str(exp_date)) and (t.hour, t.minute) >= (14, 45)
-        for p in list(L["open"]):
-            if p["mark"] <= p["sl"]:
-                close_position(L, p, p["mark"], "SL hit")
-            elif p["mark"] >= p["tgt"]:
-                close_position(L, p, p["mark"], "target hit")
-            elif squareoff:
-                close_position(L, p, p["mark"], "expiry squareoff")
+        age_min = (int(time.time()) - p.get("ts", 0)) / 60
+        squareoff = c and str(t.date()) == str(c["exp_date"]) and (t.hour, t.minute) >= (14, 45)
+        if p["mark"] <= p["sl"]:
+            close_position(L, p, p["mark"], "safety stop hit")
+        elif p["mark"] >= p["tgt"]:
+            close_position(L, p, p["mark"], "target hit")
+        elif p.get("strategy") == "scalp" and age_min >= SCALP_MAX_MIN:
+            close_position(L, p, p["mark"], "scalp time-up (60 min)")
+        elif squareoff:
+            close_position(L, p, p["mark"], "expiry squareoff")
 
-    # ── drawdown accounting ──
     eq = equity(L)
     L["peak"] = max(L["peak"], eq)
     L["maxDD"] = max(L["maxDD"], round((L["peak"] - eq) / L["peak"] * 100, 1))
     if eq < HALT_EQ:
         L["halted"] = True
         log(L, f"DESK HALTED at equity {round(eq)}")
+        tg_send(L, f"⛔ Desk halted at ₹{round(eq):,} (40% drawdown rule). "
+                   "We review the strategy together before it trades again.")
         save_ledger(L); return
 
-    # ── entries (need the chain; skip cleanly if unavailable) ──
-    if chain_ok and len(L["open"]) < MAX_POSITIONS and trades_today(L) < MAX_TRADES_PER_DAY:
-        is_expiry_day = str(t.date()) == str(exp_date)
-        if not (is_expiry_day and t.hour >= 13):
-            ce_band = {s: v["ce_oi"] for s, v in chain.items()
-                       if spot <= s <= spot + 600 and v["ce_oi"] > 0}
-            pe_band = {s: v["pe_oi"] for s, v in chain.items()
-                       if spot - 600 <= s <= spot and v["pe_oi"] > 0}
-            ce_wall = max(ce_band, key=ce_band.get) if ce_band else None
-            pe_wall = max(pe_band, key=pe_band.get) if pe_band else None
+    # ── entries ──
+    can_enter = len(L["open"]) < MAX_POSITIONS and trades_today(L) < MAX_TRADES_PER_DAY
+    holds = []
+    if can_enter:
+        for und, d in data.items():
+            if len(L["open"]) >= MAX_POSITIONS:
+                break
+            c = chains.get(und)
+            if not c:
+                continue
+            spot, e21 = d["spot"], d["e21"]
+            chain, expiry = c["chain"], c["expiry"]
+            if str(t.date()) == str(c["exp_date"]) and t.hour >= 13:
+                continue
+            band = 600 if und == "NIFTY" else 1400
+            ce_b = {s: v["ce_oi"] for s, v in chain.items() if spot <= s <= spot+band and v["ce_oi"] > 0}
+            pe_b = {s: v["pe_oi"] for s, v in chain.items() if spot-band <= s <= spot and v["pe_oi"] > 0}
+            ce_w = max(ce_b, key=ce_b.get) if ce_b else None
+            pe_w = max(pe_b, key=pe_b.get) if pe_b else None
             atm = min(chain, key=lambda s: abs(s - spot))
-            entered = False
-
-            if ce_wall and spot > ce_wall - 50 and (e21 is None or spot > e21):
+            gap = 50 if und == "NIFTY" else 100
+            if ce_w and spot > ce_w - gap and (e21 is None or spot > e21):
                 prem = chain[atm]["ce_ltp"]
                 if prem > 0:
-                    open_position(L, "CE", atm, prem,
-                                  f"spot {round(spot,1)} pressing CE wall {ce_wall}, "
-                                  f"trend up (EMA21 {round(e21,1) if e21 else 'n/a'})", expiry)
-                    entered = True
-            elif pe_wall and spot < pe_wall - 20 and (e21 is None or spot < e21):
+                    open_position(L, und, "CE", atm, prem,
+                                  f"{und} at {round(spot,1)} pressing the big ceiling {ce_w}, trend up", expiry, "wall-break")
+                    continue
+            if pe_w and spot < pe_w - 20 and (e21 is None or spot < e21):
                 prem = chain[atm]["pe_ltp"]
                 if prem > 0:
-                    open_position(L, "PE", atm, prem,
-                                  f"spot {round(spot,1)} broke PE wall {pe_wall}, "
-                                  f"trend down (EMA21 {round(e21,1) if e21 else 'n/a'})", expiry)
-                    entered = True
+                    open_position(L, und, "PE", atm, prem,
+                                  f"{und} at {round(spot,1)} broke the big floor {pe_w}, trend down", expiry, "wall-break")
+                    continue
+            holds.append(f"{und} {round(spot,1)} between {pe_w}/{ce_w}")
 
-            if not entered and not L["open"]:
-                log(L, f"HOLD — spot {round(spot,1)} inside walls (PE {pe_wall} / CE {ce_wall}), "
-                       f"EMA21 {round(e21,1) if e21 else 'n/a'}, VIX {round(vix,1) if vix else 'n/a'}")
+        # scalp experiment — NIFTY only, max 1/day, needs intraday burst
+        already_scalped = any(t2.get("strategy") == "scalp" and t2["time"].startswith(now_ist().strftime("%d-%b"))
+                              for t2 in L["trades"])
+        if not already_scalped and len(L["open"]) < MAX_POSITIONS and "NIFTY" in chains and trades_today(L) < MAX_TRADES_PER_DAY:
+            try:
+                _, m5 = yahoo_chart("%5ENSEI", rng="1d", interval="5m")
+                if len(m5) >= 5:
+                    mom = (m5[-1] - m5[-4]) / m5[-4] * 100
+                    chain = chains["NIFTY"]["chain"]
+                    atm = min(chain, key=lambda s: abs(s - m5[-1]))
+                    if mom >= 0.30 and m5[-1] > m5[-2] > m5[-3]:
+                        prem = chain[atm]["ce_ltp"]
+                        if prem > 0:
+                            open_position(L, "NIFTY", "CE", atm, prem,
+                                          f"fast burst up {mom:.2f}% in 15 min — quick ride", chains["NIFTY"]["expiry"], "scalp")
+                    elif mom <= -0.30 and m5[-1] < m5[-2] < m5[-3]:
+                        prem = chain[atm]["pe_ltp"]
+                        if prem > 0:
+                            open_position(L, "NIFTY", "PE", atm, prem,
+                                          f"fast drop {mom:.2f}% in 15 min — quick ride", chains["NIFTY"]["expiry"], "scalp")
+            except Exception as e:
+                print("scalp check failed:", e)
 
+    if not L["open"] and holds:
+        log(L, "HOLD — " + "; ".join(holds))
     save_ledger(L)
 
 
