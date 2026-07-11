@@ -18,6 +18,7 @@ jobs:
       - run: |
           git config user.name "jarvis-bot"
           git config user.email "jarvis@users.noreply.github.com"
-          git add -A BACKTEST.md run_output.txt 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "backtest run output"
+          git add run_output.txt || true
+          git add BACKTEST.md || true
+          git diff --cached --quiet || git commit -m "backtest results"
           git push
