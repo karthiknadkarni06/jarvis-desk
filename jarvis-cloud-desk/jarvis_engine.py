@@ -115,10 +115,59 @@ def load_ledger():
             "maxDD": 0.0, "halted": False, "last_run": None, "note": "initialized"}
 
 
+
+
+def write_report(L):
+    """Human-readable dashboard as REPORT.md — the page Karthik bookmarks."""
+    eq = equity(L)
+    open_pl = sum((p["mark"] - p["entry"]) * LOT * p["lots"] for p in L["open"])
+    closed = [t for t in L["trades"] if not t.get("open")]
+    wins = [t for t in closed if t["pnl"] > 0]
+    wr = f"{round(100*len(wins)/len(closed))}%" if closed else "—"
+    pnl = eq - START_CAP
+    arrow = "🟢" if pnl >= 0 else "🔴"
+    lines = [
+        "# 🤖 Jarvis Paper Trading — Live Dashboard",
+        "",
+        f"**Updated:** {L['last_run'] or now_ist().strftime('%d-%b-%Y %H:%M IST')}",
+        "",
+        f"| Money now | Profit/Loss | Goal (₹10 Lakh) | Trades | Win rate | Worst dip |",
+        f"|---|---|---|---|---|---|",
+        f"| **₹{round(eq):,}** | {arrow} ₹{round(pnl):,} | {eq/1000000*100:.1f}% | {len(closed)} | {wr} | {L['maxDD']:.1f}% |",
+        "",
+        f"**What Jarvis is thinking right now:** {L['note']}",
+        "",
+        "## Open trades",
+    ]
+    if L["open"]:
+        lines += ["| Trade | Lots | Bought at | Now at | Profit/Loss |", "|---|---|---|---|---|"]
+        for p in L["open"]:
+            pl = (p["mark"] - p["entry"]) * LOT * p["lots"]
+            e = "🟢" if pl >= 0 else "🔴"
+            lines.append(f"| NIFTY {p['strike']} {p['side']} | {p['lots']} | ₹{p['entry']} | ₹{p['mark']} | {e} ₹{round(pl):,} |")
+    else:
+        lines.append("_None right now — waiting for a good opportunity (this is normal and safe)._")
+    lines += ["", "## Trade history (latest first)"]
+    if L["trades"]:
+        lines += ["| When | Trade | Bought | Sold | Profit/Loss | Why |", "|---|---|---|---|---|---|"]
+        for t in reversed(L["trades"][-20:]):
+            ex = f"₹{t['exit']}" if not t.get("open") else "OPEN"
+            pl = f"₹{t['pnl']:,}" if not t.get("open") else "—"
+            lines.append(f"| {t['time']} | {t['und']} {t['strike']} {t['side']} ×{t['lots']} | ₹{t['entry']} | {ex} | {pl} | {t['reason'][:80]} |")
+    else:
+        lines.append("_No trades yet. Trading starts automatically when markets open (Mon–Fri, 9:15 AM)._")
+    lines += ["", "---", "_Paper trading only — practice money, no real orders ever. Refresh this page anytime to see the latest._"]
+    with open("REPORT.md", "w") as f:
+        f.write("\n".join(lines))
+
 def save_ledger(L):
     L["last_run"] = now_ist().strftime("%d-%b-%Y %H:%M IST")
     with open(LEDGER, "w") as f:
         json.dump(L, f, indent=1)
+    try:
+        write_report(L)
+    except Exception as e:
+        print("report write failed:", e)
 
 
 def equity(L):
