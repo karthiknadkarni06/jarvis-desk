@@ -24,6 +24,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run trading engine
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
         run: python jarvis_engine.py
       - name: Commit ledger
         run: |
