@@ -5,6 +5,8 @@
  "peak": 100000,
  "maxDD": 0.0,
  "halted": false,
- "last_run": "11-Jul-2026 19:20 IST",
- "note": "market closed \u2014 no action"
+ "last_run": "11-Jul-2026 19:23 IST",
+ "note": "market closed \u2014 no action",
+ "tg_chat": 1301430916,
+ "tg_hello": true
 }
