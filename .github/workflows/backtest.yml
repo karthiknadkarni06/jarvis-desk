@@ -1,0 +1,23 @@
+name: Deep Backtest
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jarvis-cloud-desk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python backtest_engine.py
+      - run: |
+          git config user.name "jarvis-bot"
+          git config user.email "jarvis@users.noreply.github.com"
+          git add BACKTEST.md
+          git diff --cached --quiet || git commit -m "deep backtest results"
+          git push
