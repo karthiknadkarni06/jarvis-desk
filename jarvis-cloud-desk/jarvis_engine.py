@@ -24,6 +24,9 @@ SCALP_OUTLAY = 0.15     # scalp experiment: up to 15%
 WALL_SL, WALL_TGT = 0.30, 0.60
 SCALP_SL, SCALP_TGT = 0.20, 0.30
 SCALP_MAX_MIN = 60
+EXP_OUTLAY = 0.10       # expiry-gamma experiment: up to 10%
+EXP_SL, EXP_TGT = 0.25, 0.50
+EXP_MAX_MIN = 45
 DERISK_EQ, HALT_EQ = 80000, 60000
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -223,6 +226,7 @@ def write_report(L):
     lines += ["", "## How Jarvis decides (plain words)",
               "- **wall-break** strategy: big players park huge option bets at certain levels — these act as floor and ceiling. When price smashes through one AND the trend agrees, Jarvis buys that direction. Stop-loss −30%, target +60%.",
               "- **scalp** experiment: when price makes a sharp fast move within the day, Jarvis rides it briefly. Smaller size (15%), tight stop −20%, quick target +30%, auto-exit within 60 minutes.",
+              "- **expiry-gamma** experiment: only on expiry day (9:30 AM-2:00 PM), when the index makes a sharp fast move — options are dirt cheap on expiry so small moves pay big. Tiny 10% size, stop -25%, target +50%, auto-exit in 45 minutes. Never in the final 90 minutes where time-decay eats everything.",
               "- Most of the time: **no trade**. Sitting out when there's no edge is the strategy working, not failing.",
               "- Hard safety rules: max 2 positions, max 3 trades/day, sizes halve below ₹80k, everything halts below ₹60k.",
               "", "---",
@@ -251,7 +255,7 @@ def close_position(L, p, price, why):
 def open_position(L, und, side, strike, prem, why, expiry, strategy):
     eq = equity(L)
     lot = UNDS[und]["lot"]
-    cap = SCALP_OUTLAY if strategy == "scalp" else WALL_OUTLAY
+    cap = {"scalp": SCALP_OUTLAY, "expiry-gamma": EXP_OUTLAY}.get(strategy, WALL_OUTLAY)
     if eq < DERISK_EQ:
         cap /= 2
     lots = int((eq * cap) // (prem * lot))
@@ -262,7 +266,8 @@ def open_position(L, und, side, strike, prem, why, expiry, strategy):
     if cost > L["capital"]:
         return
     L["capital"] -= cost
-    sl_pct, tgt_pct = (SCALP_SL, SCALP_TGT) if strategy == "scalp" else (WALL_SL, WALL_TGT)
+    sl_pct, tgt_pct = {"scalp": (SCALP_SL, SCALP_TGT),
+                       "expiry-gamma": (EXP_SL, EXP_TGT)}.get(strategy, (WALL_SL, WALL_TGT))
     t = now_ist().strftime("%d-%b %H:%M")
     L["open"].append({"und": und, "side": side, "strike": strike, "entry": prem, "mark": prem,
                       "lots": lots, "sl": round(prem*(1-sl_pct), 1), "tgt": round(prem*(1+tgt_pct), 1),
@@ -356,6 +361,8 @@ def main():
             close_position(L, p, p["mark"], "target hit")
         elif p.get("strategy") == "scalp" and age_min >= SCALP_MAX_MIN:
             close_position(L, p, p["mark"], "scalp time-up (60 min)")
+        elif p.get("strategy") == "expiry-gamma" and age_min >= EXP_MAX_MIN:
+            close_position(L, p, p["mark"], "expiry trade time-up (45 min)")
         elif squareoff:
             close_position(L, p, p["mark"], "expiry squareoff")
 
@@ -426,6 +433,40 @@ def main():
                                           f"fast drop {mom:.2f}% in 15 min — quick ride", chains["NIFTY"]["expiry"], "scalp")
             except Exception as e:
                 print("scalp check failed:", e)
+
+        # expiry-gamma experiment — only on an underlying's own expiry day
+        already_exp = any(t2.get("strategy") == "expiry-gamma" and t2["time"].startswith(now_ist().strftime("%d-%b"))
+                          for t2 in L["trades"])
+        if not already_exp and len(L["open"]) < MAX_POSITIONS and trades_today(L) < MAX_TRADES_PER_DAY:
+            m = t.hour * 60 + t.minute
+            if 570 <= m <= 840:  # 09:30-14:00 only; last 90 min is pure decay poison
+                for und in chains:
+                    if str(t.date()) != str(chains[und]["exp_date"]):
+                        continue
+                    try:
+                        _, m5 = yahoo_chart(UNDS[und]["yahoo"], rng="1d", interval="5m")
+                        if len(m5) < 5:
+                            continue
+                        mom = (m5[-1] - m5[-4]) / m5[-4] * 100
+                        chain = chains[und]["chain"]
+                        atm = min(chain, key=lambda s: abs(s - m5[-1]))
+                        thr = 0.35
+                        if mom >= thr and m5[-1] > m5[-2]:
+                            prem = chain[atm]["ce_ltp"]
+                            if prem > 0:
+                                open_position(L, und, "CE", atm, prem,
+                                              f"EXPIRY DAY spike: {und} up {mom:.2f}% fast — cheap option, big leverage, tight leash",
+                                              chains[und]["expiry"], "expiry-gamma")
+                                break
+                        elif mom <= -thr and m5[-1] < m5[-2]:
+                            prem = chain[atm]["pe_ltp"]
+                            if prem > 0:
+                                open_position(L, und, "PE", atm, prem,
+                                              f"EXPIRY DAY drop: {und} down {mom:.2f}% fast — cheap option, big leverage, tight leash",
+                                              chains[und]["expiry"], "expiry-gamma")
+                                break
+                    except Exception as e:
+                        print("expiry-gamma check failed:", e)
 
     if not L["open"] and holds:
         log(L, "HOLD — " + "; ".join(holds))
