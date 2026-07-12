@@ -1,6 +1,6 @@
 # 📊 Deep Backtest v3 — NIFTY · BANKNIFTY · SENSEX (5y daily)
 
-Run 12-Jul-2026 15:41 UTC · data: Upstox public candles · timeframe: DAILY candles, signals at close
+Run 12-Jul-2026 16:01 UTC · data: Upstox public candles · timeframe: DAILY candles, signals at close
 
 _PF = profit factor. >1.3 with 20+ trades = respectable edge. Points are index points._
 
@@ -14,6 +14,7 @@ _PF = profit factor. >1.3 with 20+ trades = respectable edge. Points are index p
 | EMA9/21 cross — CE | 25 | 40% | +2335 | 1.32 |
 | EMA5 fast momentum 3d — CE | 53 | 57% | +492 | 1.07 |
 | 20d breakout+trend — CE | 30 | 30% | +35 | 1.01 |
+| EMA 5>9>21 triple alignment — CE | 21 | 33% | -391 | 0.91 |
 
 ## BANKNIFTY (1240 days)
 
@@ -23,6 +24,7 @@ _PF = profit factor. >1.3 with 20+ trades = respectable edge. Points are index p
 | +2% burst 5d hold — CE | 62 | 63% | +19765 | 2.43 |
 | EMA5/21 cross — CE | 34 | 38% | +8634 | 1.50 |
 | EMA9/21 cross — CE | 25 | 36% | +6549 | 1.42 |
+| EMA 5>9>21 triple alignment — CE | 27 | 37% | +3142 | 1.27 |
 | 20d breakout+trend — CE | 29 | 41% | +2302 | 1.15 |
 | EMA5 fast momentum 3d — CE | 60 | 53% | -3767 | 0.82 |
 
@@ -36,6 +38,7 @@ _PF = profit factor. >1.3 with 20+ trades = respectable edge. Points are index p
 | 20d breakout+trend — CE | 31 | 29% | +1427 | 1.07 |
 | EMA5 fast momentum 3d — CE | 59 | 53% | -1935 | 0.93 |
 | RSI<35 dip-buy uptrend — CE | 11 | 45% | -1295 | 0.88 |
+| EMA 5>9>21 triple alignment — CE | 21 | 29% | -5260 | 0.68 |
 
 ## 🏆 Robustness check — strategies that worked on ALL THREE indices
 
@@ -45,3 +48,4 @@ _PF = profit factor. >1.3 with 20+ trades = respectable edge. Points are index p
 - ✅ **20d breakout+trend — CE** — NIFTY: PF 1.01 (30tr) · BANKNIFTY: PF 1.15 (29tr) · SENSEX: PF 1.07 (31tr)
 - ⚠️ **RSI<35 dip-buy uptrend — CE** — NIFTY: PF 1.60 (8tr) · BANKNIFTY: PF 3.28 (10tr) · SENSEX: PF 0.88 (11tr)
 - ⚠️ **EMA5 fast momentum 3d — CE** — NIFTY: PF 1.07 (53tr) · BANKNIFTY: PF 0.82 (60tr) · SENSEX: PF 0.93 (59tr)
+- ⚠️ **EMA 5>9>21 triple alignment — CE** — NIFTY: PF 0.91 (21tr) · BANKNIFTY: PF 1.27 (27tr) · SENSEX: PF 0.68 (21tr)
