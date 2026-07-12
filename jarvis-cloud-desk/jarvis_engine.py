@@ -12,8 +12,10 @@ IST = ZoneInfo("Asia/Kolkata")
 LEDGER = "ledger.json"
 
 UNDS = {
-    "NIFTY":     {"lot": 75, "yahoo": "%5ENSEI",    "nse": "NIFTY"},
-    "BANKNIFTY": {"lot": 35, "yahoo": "%5ENSEBANK", "nse": "BANKNIFTY"},
+    "NIFTY":     {"lot": 75, "yahoo": "%5ENSEI",    "nse": "NIFTY",
+                  "upstox": "NSE_INDEX%7CNifty%2050"},
+    "BANKNIFTY": {"lot": 35, "yahoo": "%5ENSEBANK", "nse": "BANKNIFTY",
+                  "upstox": "NSE_INDEX%7CNifty%20Bank"},
 }
 
 START_CAP = 100000
@@ -46,6 +48,43 @@ def yahoo_chart(symbol, rng="6mo", interval="1d"):
     closes = [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
     spot = res["meta"].get("regularMarketPrice") or (closes[-1] if closes else None)
     return spot, closes
+
+
+def upstox_daily_closes(key, days=400):
+    from datetime import timedelta, date
+    to = date.today()
+    frm = to - timedelta(days=days)
+    body, _ = http_get(f"https://api.upstox.com/v2/historical-candle/{key}/day/{to}/{frm}",
+                       {"User-Agent": UA, "Accept": "application/json"})
+    candles = json.loads(body).get("data", {}).get("candles", [])
+    candles.sort(key=lambda c: c[0])
+    return [float(c[4]) for c in candles]
+
+
+def upstox_intraday_closes(key, interval="1minute"):
+    body, _ = http_get(f"https://api.upstox.com/v2/historical-candle/intraday/{key}/{interval}",
+                       {"User-Agent": UA, "Accept": "application/json"})
+    candles = json.loads(body).get("data", {}).get("candles", [])
+    candles.sort(key=lambda c: c[0])
+    return [float(c[4]) for c in candles]
+
+
+def get_prices(und):
+    """Returns (spot, daily_closes). Upstox primary, Yahoo fallback."""
+    key = UNDS[und]["upstox"]
+    try:
+        daily = upstox_daily_closes(key)
+        if len(daily) < 60:
+            raise RuntimeError("thin daily data")
+        try:
+            intra = upstox_intraday_closes(key, "1minute")
+            spot = intra[-1] if intra else daily[-1]
+        except Exception:
+            spot = daily[-1]
+        return spot, daily
+    except Exception as e:
+        print(f"upstox failed for {und} ({e}); trying yahoo")
+        return yahoo_chart(UNDS[und]["yahoo"])
 
 
 def nse_chain(nse_symbol):
@@ -326,7 +365,7 @@ def main():
     data = {}
     for und, cfg in UNDS.items():
         try:
-            spot, closes = yahoo_chart(cfg["yahoo"])
+            spot, closes = get_prices(und)
             e21 = ema(closes[-80:], 21)
             data[und] = {"spot": spot, "e21": e21}
         except Exception as e:
@@ -416,9 +455,9 @@ def main():
                               for t2 in L["trades"])
         if not already_scalped and len(L["open"]) < MAX_POSITIONS and "NIFTY" in chains and trades_today(L) < MAX_TRADES_PER_DAY:
             try:
-                _, m5 = yahoo_chart("%5ENSEI", rng="1d", interval="5m")
-                if len(m5) >= 5:
-                    mom = (m5[-1] - m5[-4]) / m5[-4] * 100
+                m5 = upstox_intraday_closes(UNDS["NIFTY"]["upstox"], "1minute")
+                if len(m5) >= 16:
+                    mom = (m5[-1] - m5[-16]) / m5[-16] * 100
                     chain = chains["NIFTY"]["chain"]
                     atm = min(chain, key=lambda s: abs(s - m5[-1]))
                     if mom >= 0.30 and m5[-1] > m5[-2] > m5[-3]:
@@ -444,10 +483,10 @@ def main():
                     if str(t.date()) != str(chains[und]["exp_date"]):
                         continue
                     try:
-                        _, m5 = yahoo_chart(UNDS[und]["yahoo"], rng="1d", interval="5m")
-                        if len(m5) < 5:
+                        m5 = upstox_intraday_closes(UNDS[und]["upstox"], "1minute")
+                        if len(m5) < 16:
                             continue
-                        mom = (m5[-1] - m5[-4]) / m5[-4] * 100
+                        mom = (m5[-1] - m5[-16]) / m5[-16] * 100
                         chain = chains[und]["chain"]
                         atm = min(chain, key=lambda s: abs(s - m5[-1]))
                         thr = 0.35
