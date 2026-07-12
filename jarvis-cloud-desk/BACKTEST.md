@@ -1,26 +1,47 @@
-# 📊 Deep Backtest — NIFTY, 5 Years Daily
+# 📊 Deep Backtest v3 — NIFTY · BANKNIFTY · SENSEX (5y daily)
 
-**Data:** 1241 trading days · source: Upstox public candles · run 11-Jul-2026 18:32 UTC
+Run 12-Jul-2026 15:41 UTC · data: Upstox public candles · timeframe: DAILY candles, signals at close
 
-**Monday-readiness diagnostic (from cloud server):** Upstox intraday: OK (0 candles) · NSE: OK · Yahoo: FAIL: HTTP Error 429: Too Many Requests
+_PF = profit factor. >1.3 with 20+ trades = respectable edge. Points are index points._
 
-_Measures directional signal edge in index points; options amplify both ways. PF = profit factor (>1.3 with 20+ trades = respectable)._
+## NIFTY (1240 days)
 
-| Strategy | Trades | Win% | Net pts | Avg/trade | PF |
-|---|---|---|---|---|---|
-| RSI<35 dip-buy in uptrend — CE | 8 | 62% | +1006 | +126 | 1.60 |
-| +2% burst continuation, 5d hold — CE | 58 | 57% | +2479 | +43 | 1.36 |
-| EMA9/21 cross up — buy CE, hold trend | 25 | 40% | +2335 | +93 | 1.32 |
-| 20d high breakout + uptrend — CE | 30 | 30% | +35 | +1 | 1.01 |
-| 3-red-days bounce — CE | 76 | 62% | -3289 | -43 | 0.67 |
-| -2% drop continuation, 5d hold — PE | 46 | 48% | -3750 | -82 | 0.59 |
-| EMA9/21 cross down — buy PE, hold trend | 26 | 27% | -3986 | -153 | 0.41 |
-| 20d low breakdown — PE | 32 | 16% | -7195 | -225 | 0.20 |
+| Strategy | Trades | Win% | Net pts | PF |
+|---|---|---|---|---|
+| RSI<35 dip-buy uptrend — CE | 8 | 62% | +1006 | 1.60 |
+| +2% burst 5d hold — CE | 58 | 57% | +2479 | 1.36 |
+| EMA5/21 cross — CE | 32 | 31% | +2479 | 1.32 |
+| EMA9/21 cross — CE | 25 | 40% | +2335 | 1.32 |
+| EMA5 fast momentum 3d — CE | 53 | 57% | +492 | 1.07 |
+| 20d breakout+trend — CE | 30 | 30% | +35 | 1.01 |
 
-## 🏆 Top 5 (min 8 trades, by profit factor)
+## BANKNIFTY (1240 days)
 
-1. **RSI<35 dip-buy in uptrend — CE** — PF 1.60 · 62% wins · 8 trades · +1006 pts
-2. **+2% burst continuation, 5d hold — CE** — PF 1.36 · 57% wins · 58 trades · +2479 pts
-3. **EMA9/21 cross up — buy CE, hold trend** — PF 1.32 · 40% wins · 25 trades · +2335 pts
-4. **20d high breakout + uptrend — CE** — PF 1.01 · 30% wins · 30 trades · +35 pts
-5. **3-red-days bounce — CE** — PF 0.67 · 62% wins · 76 trades · -3289 pts
+| Strategy | Trades | Win% | Net pts | PF |
+|---|---|---|---|---|
+| RSI<35 dip-buy uptrend — CE | 10 | 70% | +7518 | 3.28 |
+| +2% burst 5d hold — CE | 62 | 63% | +19765 | 2.43 |
+| EMA5/21 cross — CE | 34 | 38% | +8634 | 1.50 |
+| EMA9/21 cross — CE | 25 | 36% | +6549 | 1.42 |
+| 20d breakout+trend — CE | 29 | 41% | +2302 | 1.15 |
+| EMA5 fast momentum 3d — CE | 60 | 53% | -3767 | 0.82 |
+
+## SENSEX (1240 days)
+
+| Strategy | Trades | Win% | Net pts | PF |
+|---|---|---|---|---|
+| EMA5/21 cross — CE | 33 | 30% | +6518 | 1.26 |
+| EMA9/21 cross — CE | 25 | 36% | +5744 | 1.24 |
+| +2% burst 5d hold — CE | 60 | 55% | +2376 | 1.08 |
+| 20d breakout+trend — CE | 31 | 29% | +1427 | 1.07 |
+| EMA5 fast momentum 3d — CE | 59 | 53% | -1935 | 0.93 |
+| RSI<35 dip-buy uptrend — CE | 11 | 45% | -1295 | 0.88 |
+
+## 🏆 Robustness check — strategies that worked on ALL THREE indices
+
+- ✅ **EMA5/21 cross — CE** — NIFTY: PF 1.32 (32tr) · BANKNIFTY: PF 1.50 (34tr) · SENSEX: PF 1.26 (33tr)
+- ✅ **EMA9/21 cross — CE** — NIFTY: PF 1.32 (25tr) · BANKNIFTY: PF 1.42 (25tr) · SENSEX: PF 1.24 (25tr)
+- ✅ **+2% burst 5d hold — CE** — NIFTY: PF 1.36 (58tr) · BANKNIFTY: PF 2.43 (62tr) · SENSEX: PF 1.08 (60tr)
+- ✅ **20d breakout+trend — CE** — NIFTY: PF 1.01 (30tr) · BANKNIFTY: PF 1.15 (29tr) · SENSEX: PF 1.07 (31tr)
+- ⚠️ **RSI<35 dip-buy uptrend — CE** — NIFTY: PF 1.60 (8tr) · BANKNIFTY: PF 3.28 (10tr) · SENSEX: PF 0.88 (11tr)
+- ⚠️ **EMA5 fast momentum 3d — CE** — NIFTY: PF 1.07 (53tr) · BANKNIFTY: PF 0.82 (60tr) · SENSEX: PF 0.93 (59tr)

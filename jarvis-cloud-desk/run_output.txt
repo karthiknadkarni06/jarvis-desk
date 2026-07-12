@@ -1,6 +1,3 @@
-/home/runner/work/jarvis-desk/jarvis-desk/jarvis-cloud-desk/backtest_engine.py:16: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-  to = datetime.utcnow().date()
-/home/runner/work/jarvis-desk/jarvis-desk/jarvis-cloud-desk/backtest_engine.py:157: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
-  f"\n**Data:** {N} trading days · source: {src} · run {datetime.utcnow().strftime('%d-%b-%Y %H:%M UTC')}",
-data: 1241 days from Upstox public candles; diag: {'upstox_intraday': 'OK (0 candles)', 'nse_prime': 'OK', 'yahoo': 'FAIL: HTTP Error 429: Too Many Requests'}
-BACKTEST.md written
+/home/runner/work/jarvis-desk/jarvis-desk/jarvis-cloud-desk/backtest_engine.py:112: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  f"\nRun {datetime.utcnow().strftime('%d-%b-%Y %H:%M UTC')} · data: Upstox public candles · timeframe: DAILY candles, signals at close",
+done
