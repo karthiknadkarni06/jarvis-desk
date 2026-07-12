@@ -1,0 +1,26 @@
+name: Stocks Backtest
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  stocks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: jarvis-cloud-desk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python stocks_backtest.py > stocks_output.txt 2>&1 || true
+      - run: |
+          git config user.name "jarvis-bot"
+          git config user.email "jarvis@users.noreply.github.com"
+          git pull --rebase || true
+          git add stocks_output.txt || true
+          git add STOCKS_BACKTEST.md || true
+          git diff --cached --quiet || git commit -m "stocks backtest results"
+          git push
