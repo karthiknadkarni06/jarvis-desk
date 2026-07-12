@@ -23,14 +23,20 @@ def get(url, timeout=40, binary=False):
 
 print("downloading instrument master...")
 raw = get("https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz", binary=True)
-rows = csv.DictReader(io.StringIO(gzip.decompress(raw).decode()))
+text = gzip.decompress(raw).decode()
+rows = list(csv.DictReader(io.StringIO(text)))
+if rows:
+    print("CSV columns:", list(rows[0].keys()))
+    print("sample row:", {k: rows[0][k] for k in list(rows[0].keys())[:8]})
 keymap = {}
 for r in rows:
-    if r.get("exchange") == "NSE_EQ" and r.get("instrument_type") == "EQ":
-        sym = r.get("tradingsymbol") or r.get("trading_symbol")
-        if sym in FNO:
-            keymap[sym] = r["instrument_key"].replace("|", "%7C")
-print(f"mapped {len(keymap)}/{len(FNO)} symbols")
+    seg = (r.get("exchange") or r.get("segment") or "").upper()
+    itype = (r.get("instrument_type") or r.get("instrumenttype") or "").upper()
+    sym = (r.get("tradingsymbol") or r.get("trading_symbol") or r.get("symbol") or "").upper()
+    ikey = r.get("instrument_key") or r.get("instrumentkey") or ""
+    if "EQ" in seg and itype in ("EQ", "EQUITY", "") and sym in FNO and ikey:
+        keymap.setdefault(sym, ikey.replace("|", "%7C"))
+print(f"mapped {len(keymap)}/{len(FNO)} symbols; missing: {sorted(set(FNO)-set(keymap))[:10]}")
 
 def daily_closes(key, years=5):
     out = []
