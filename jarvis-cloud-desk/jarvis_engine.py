@@ -189,6 +189,95 @@ def tg_send(L, text):
         tg_api("sendMessage", {"chat_id": chat, "text": text})
 
 
+
+
+def tg_updates(L):
+    """Fetch new incoming messages since last processed."""
+    token = os.environ.get("TG_TOKEN", "")
+    if not token:
+        return []
+    r = tg_api("getUpdates", {"offset": L.get("tg_offset", 0) + 1, "timeout": 0})
+    msgs = []
+    if r and r.get("result"):
+        for u in r["result"]:
+            L["tg_offset"] = max(L.get("tg_offset", 0), u["update_id"])
+            m = u.get("message") or {}
+            if m.get("text") and m.get("chat", {}).get("id"):
+                L["tg_chat"] = m["chat"]["id"]
+                msgs.append(m["text"].strip().lower())
+    return msgs
+
+
+def cmd_market(L):
+    parts = []
+    for und in UNDS:
+        try:
+            spot, closes = get_prices(und)
+            e21 = ema(closes[-80:], 21)
+            trend = "UP 🟢" if (e21 and spot > e21) else "DOWN 🔴" if e21 else "?"
+            chg = (spot - closes[-2]) / closes[-2] * 100 if len(closes) >= 2 else 0
+            parts.append(f"{und}: {round(spot,1)} ({chg:+.2f}%) · trend {trend} (EMA21 {round(e21,1) if e21 else '?'})")
+        except Exception as e:
+            parts.append(f"{und}: data unavailable")
+    t = now_ist()
+    status = "market OPEN" if market_open(t) else "market closed"
+    tg_send(L, "📈 " + status + "\n" + "\n".join(parts))
+
+
+def cmd_status(L):
+    eq = equity(L)
+    pnl = eq - START_CAP
+    e = "🟢" if pnl >= 0 else "🔴"
+    closed = [t for t in L["trades"] if not t.get("open")]
+    wins = sum(1 for t in closed if t["pnl"] > 0)
+    msg = (f"💼 Desk status\nMoney: ₹{round(eq):,} ({e} ₹{round(pnl):,})\n"
+           f"Goal: {eq/1000000*100:.1f}% of ₹10L\n"
+           f"Trades: {len(closed)} closed, win rate {round(100*wins/len(closed)) if closed else 0}%")
+    if L["open"]:
+        for p in L["open"]:
+            pl = (p["mark"] - p["entry"]) * UNDS[p["und"]]["lot"] * p["lots"]
+            msg += f"\nOPEN: {p['und']} {p['strike']} {p['side']} ×{p['lots']} · {'🟢' if pl>=0 else '🔴'} ₹{round(pl):,}"
+    else:
+        msg += "\nNo open positions."
+    msg += f"\nLast thought: {L['note']}"
+    tg_send(L, msg)
+
+
+def cmd_walls(L):
+    try:
+        expiry, chain = nse_chain("NIFTY")
+        spot, _ = get_prices("NIFTY")
+        ce_b = {s: v["ce_oi"] for s, v in chain.items() if spot <= s <= spot+600 and v["ce_oi"] > 0}
+        pe_b = {s: v["pe_oi"] for s, v in chain.items() if spot-600 <= s <= spot and v["pe_oi"] > 0}
+        ce = sorted(ce_b.items(), key=lambda x: -x[1])[:2]
+        pe = sorted(pe_b.items(), key=lambda x: -x[1])[:2]
+        msg = (f"🧱 NIFTY walls (expiry {expiry})\nSpot: {round(spot,1)}\n"
+               f"Ceiling: " + ", ".join(f"{int(s)} ({oi/1e6:.1f}M)" for s, oi in ce) +
+               f"\nFloor: " + ", ".join(f"{int(s)} ({oi/1e6:.1f}M)" for s, oi in pe))
+        tg_send(L, msg)
+    except Exception as e:
+        tg_send(L, f"Option chain unavailable right now ({str(e)[:50]}). Try again in a few minutes.")
+
+
+def handle_commands(L):
+    for text in tg_updates(L):
+        if any(w in text for w in ("market", "nifty", "banknifty", "price")):
+            cmd_market(L)
+        elif any(w in text for w in ("status", "pnl", "money", "profit", "position", "report", "how")):
+            cmd_status(L)
+        elif any(w in text for w in ("wall", "chain", "oi", "option")):
+            cmd_walls(L)
+        elif "help" in text or text in ("/start", "hi", "hello"):
+            tg_send(L, "🤖 I understand these:\n"
+                       "• market — live NIFTY/BANKNIFTY + trend\n"
+                       "• status — money, positions, P&L\n"
+                       "• walls — option walls (ceiling/floor)\n"
+                       "Replies take a few minutes (I wake on a cycle).\n"
+                       "For deep analysis, ask Jarvis in the Claude app.")
+        else:
+            tg_send(L, "Didn't catch that. Try: market · status · walls · help")
+
+
 def tg_daily_summary(L):
     eq = equity(L)
     today = now_ist().strftime("%d-%b")
@@ -350,6 +439,11 @@ def main():
         tg_send(L, "🤖 Jarvis connected! I will message you here for every trade "
                    "and a daily report at market close. Paper trading only — practice money.")
         L["tg_hello"] = True
+
+    try:
+        handle_commands(L)
+    except Exception as e:
+        print("command handling failed:", e)
 
     if L["halted"]:
         log(L, "desk halted (drawdown) — no action"); save_ledger(L); return
