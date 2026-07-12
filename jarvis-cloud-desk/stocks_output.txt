@@ -1,0 +1,3 @@
+downloading instrument master...
+mapped 0/90 symbols
+done, 0 stocks
