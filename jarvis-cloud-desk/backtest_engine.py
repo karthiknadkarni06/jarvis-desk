@@ -100,6 +100,14 @@ def run_all(C):
             if pos is None and C[i]>max(C[i-20:i]) and C[i]>e50[i]: pos=C[i]
             elif pos and C[i]<e21[i]: tr.append(C[i]-pos); pos=None
         return tr
+    def s7():  # triple EMA alignment: EMA5 crosses above EMA9 while EMA9>EMA21; exit EMA5<EMA9
+        tr=[];pos=None
+        for i in range(50,N):
+            if None in (e5[i],e9[i],e21[i],e5[i-1],e9[i-1]): continue
+            if pos is None and e5[i]>e9[i] and e5[i-1]<=e9[i-1] and e9[i]>e21[i]: pos=C[i]
+            elif pos and e5[i]<e9[i]: tr.append(C[i]-pos); pos=None
+        return tr
+    R["EMA 5>9>21 triple alignment — CE"]=stats(s7())
     R["EMA5/21 cross — CE"]=stats(s1())
     R["EMA5 fast momentum 3d — CE"]=stats(s2())
     R["EMA9/21 cross — CE"]=stats(s3())
