@@ -70,21 +70,42 @@ def upstox_intraday_closes(key, interval="1minute"):
 
 
 def get_prices(und):
-    """Returns (spot, daily_closes). Upstox primary, Yahoo fallback."""
+    """Returns (spot, daily_closes). Tries Upstox v2, Upstox v3, then Yahoo. Raises with detail if all fail."""
     key = UNDS[und]["upstox"]
+    errors = []
+    # Source 1: Upstox v2 daily
     try:
         daily = upstox_daily_closes(key)
-        if len(daily) < 60:
-            raise RuntimeError("thin daily data")
-        try:
-            intra = upstox_intraday_closes(key, "1minute")
-            spot = intra[-1] if intra else daily[-1]
-        except Exception:
-            spot = daily[-1]
-        return spot, daily
+        if len(daily) >= 60:
+            try:
+                intra = upstox_intraday_closes(key, "1minute")
+                spot = intra[-1] if intra else daily[-1]
+            except Exception:
+                spot = daily[-1]
+            return spot, daily
+        errors.append("upstox-v2:thin")
     except Exception as e:
-        print(f"upstox failed for {und} ({e}); trying yahoo")
+        errors.append(f"upstox-v2:{str(e)[:20]}")
+    # Source 2: Upstox v3 daily
+    try:
+        from datetime import date, timedelta
+        to = date.today(); frm = to - timedelta(days=400)
+        body, _ = http_get(f"https://api.upstox.com/v3/historical-candle/{key}/days/1/{to}/{frm}",
+                           {"User-Agent": UA, "Accept": "application/json"})
+        candles = json.loads(body).get("data", {}).get("candles", [])
+        candles.sort(key=lambda c: c[0])
+        daily = [float(c[4]) for c in candles]
+        if len(daily) >= 60:
+            return daily[-1], daily
+        errors.append("upstox-v3:thin")
+    except Exception as e:
+        errors.append(f"upstox-v3:{str(e)[:20]}")
+    # Source 3: Yahoo
+    try:
         return yahoo_chart(UNDS[und]["yahoo"])
+    except Exception as e:
+        errors.append(f"yahoo:{str(e)[:20]}")
+    raise RuntimeError("all sources failed: " + " | ".join(errors))
 
 
 def nse_chain(nse_symbol):
