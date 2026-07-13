@@ -457,15 +457,17 @@ def main():
 
     # ── data per underlying ──
     data = {}
+    data_errors = []
     for und, cfg in UNDS.items():
         try:
             spot, closes = get_prices(und)
             e21 = ema(closes[-80:], 21)
             data[und] = {"spot": spot, "e21": e21}
         except Exception as e:
+            data_errors.append(f"{und}: {str(e)[:40]}")
             print(f"{und} price data failed: {e}")
     if not data:
-        log(L, "all price data unavailable — holding safely"); save_ledger(L); return
+        log(L, f"⚠ price data unavailable — {'; '.join(data_errors)}"); save_ledger(L); return
 
     chains = {}
     for und in list(data.keys()):
