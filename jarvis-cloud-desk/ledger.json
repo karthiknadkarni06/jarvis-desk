@@ -5,7 +5,7 @@
  "peak": 100000,
  "maxDD": 0.0,
  "halted": false,
- "last_run": "16-Jul-2026 21:38 IST",
+ "last_run": "16-Jul-2026 23:07 IST",
  "note": "market closed \u2014 no action",
  "tg_chat": 1301430916,
  "tg_hello": true,
@@ -15,6 +15,6 @@
    100000
   ]
  ],
- "tg_offset": 793561917,
+ "tg_offset": 793561918,
  "summary_date": "2026-07-16"
 }
