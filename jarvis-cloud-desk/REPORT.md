@@ -1,6 +1,6 @@
 # 🤖 Jarvis Paper Trading — Live Dashboard
 
-**Updated:** 26-Aug-2026 23:53 IST
+**Updated:** 27-Aug-2026 01:48 IST
 
 | Money now | Profit/Loss | Goal (₹10 Lakh) | Trades | Win rate | Worst dip |
 |---|---|---|---|---|---|
